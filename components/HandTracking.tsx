@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { HandLandmarker, FilesetResolver, NormalizedLandmark } from "@mediapipe/tasks-vision";
 import { detectGesture } from "../lib/gesture-recognition";
 import { GestureSmoother } from "../lib/gesture-smoothing";
@@ -30,100 +30,33 @@ export default function HandTracking() {
   const handLandmarkerRef = useRef<HandLandmarker | null>(null);
   const requestRef = useRef<number | null>(null);
 
-  const lastFpsTime = useRef<number>(performance.now());
+  const lastFpsTime = useRef<number>(0);
   const frames = useRef<number>(0);
+  const lastVideoTimeRef = useRef<number>(-1);
 
-  useEffect(() => {
-    let active = true;
-    async function initMediaPipe() {
-      try {
-        const vision = await FilesetResolver.forVisionTasks(
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
-        );
-        const handLandmarker = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
-            delegate: "GPU"
-          },
-          runningMode: "VIDEO",
-          numHands: 2, 
-        });
-
-        if (!active) return;
-        handLandmarkerRef.current = handLandmarker;
-        setIsLoaded(true);
-        startCamera();
-      } catch (err: any) {
-        if (active) setError("Failed to load MediaPipe: " + err.message);
-      }
-    }
-    initMediaPipe();
+  const drawLandmarks = useCallback((ctx: CanvasRenderingContext2D, landmarks: NormalizedLandmark[], width: number, height: number) => {
+    const connections = HandLandmarker.HAND_CONNECTIONS;
     
-    return () => { 
-      active = false; 
-    };
-  }, []);
+    ctx.strokeStyle = "#00FF00";
+    ctx.lineWidth = 2;
+    for (const connection of connections) {
+      const start = landmarks[connection.start];
+      const end = landmarks[connection.end];
+      ctx.beginPath();
+      ctx.moveTo(start.x * width, start.y * height);
+      ctx.lineTo(end.x * width, end.y * height);
+      ctx.stroke();
+    }
 
-  useEffect(() => {
-    if (threeCanvasRef.current) {
-      sceneManagerRef.current = new SceneManager(
-        threeCanvasRef.current, 
-        threeCanvasRef.current.clientWidth, 
-        threeCanvasRef.current.clientHeight,
-        audioEngineRef.current
-      );
-      
-      sceneManagerRef.current.onSceneChange = (name) => {
-        setActiveSceneName(name);
-      };
-
-      const handleResize = () => {
-        if (sceneManagerRef.current && threeCanvasRef.current) {
-          sceneManagerRef.current.resize(
-            threeCanvasRef.current.clientWidth,
-            threeCanvasRef.current.clientHeight
-          );
-        }
-      };
-      window.addEventListener("resize", handleResize);
-
-      return () => {
-        window.removeEventListener("resize", handleResize);
-        if (sceneManagerRef.current) {
-          sceneManagerRef.current.dispose();
-          sceneManagerRef.current = null;
-        }
-      };
+    ctx.fillStyle = "#FF0000";
+    for (const landmark of landmarks) {
+      ctx.beginPath();
+      ctx.arc(landmark.x * width, landmark.y * height, 4, 0, 2 * Math.PI);
+      ctx.fill();
     }
   }, []);
 
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current?.play();
-          requestRef.current = requestAnimationFrame(predict);
-        };
-      }
-    } catch (err: any) {
-      setError("Failed to access camera: " + err.message);
-    }
-  };
-
-  const enableMic = async () => {
-    setMicStatus("Requesting...");
-    await audioEngineRef.current.initialize();
-    if (audioEngineRef.current.isReady) {
-      setMicStatus("Active");
-    } else {
-      setMicStatus("Denied/Error");
-    }
-  };
-
-  let lastVideoTime = -1;
-  const predict = (timestamp: number) => {
+  const predict = useCallback(function predictLoop(timestamp: number) {
     frames.current++;
     if (timestamp - lastFpsTime.current >= 1000) {
       setFps(Math.round((frames.current * 1000) / (timestamp - lastFpsTime.current)));
@@ -141,13 +74,13 @@ export default function HandTracking() {
       const canvas = mediapipeCanvasRef.current;
       const ctx = canvas.getContext("2d");
 
-      if (video.videoWidth > 0 && video.currentTime !== lastVideoTime) {
-        lastVideoTime = video.currentTime;
+      if (video.videoWidth > 0 && video.currentTime !== lastVideoTimeRef.current) {
+        lastVideoTimeRef.current = video.currentTime;
         
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
 
-        const results = handLandmarkerRef.current.detectForVideo(video, performance.now());
+        const results = handLandmarkerRef.current.detectForVideo(video, timestamp);
         
         if (ctx) {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -185,28 +118,100 @@ export default function HandTracking() {
         }
       }
     }
-    requestRef.current = requestAnimationFrame(predict);
-  };
+    requestRef.current = requestAnimationFrame(predictLoop);
+  }, [drawLandmarks]);
 
-  const drawLandmarks = (ctx: CanvasRenderingContext2D, landmarks: NormalizedLandmark[], width: number, height: number) => {
-    const connections = HandLandmarker.HAND_CONNECTIONS;
+  useEffect(() => {
+    let active = true;
     
-    ctx.strokeStyle = "#00FF00";
-    ctx.lineWidth = 2;
-    for (const connection of connections) {
-      const start = landmarks[connection.start];
-      const end = landmarks[connection.end];
-      ctx.beginPath();
-      ctx.moveTo(start.x * width, start.y * height);
-      ctx.lineTo(end.x * width, end.y * height);
-      ctx.stroke();
-    }
+    const startCamera = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.onloadedmetadata = () => {
+            videoRef.current?.play();
+            requestRef.current = requestAnimationFrame(predict);
+          };
+        }
+      } catch (err: unknown) {
+        if (err instanceof Error) {
+          setError("Failed to access camera: " + err.message);
+        }
+      }
+    };
 
-    ctx.fillStyle = "#FF0000";
-    for (const landmark of landmarks) {
-      ctx.beginPath();
-      ctx.arc(landmark.x * width, landmark.y * height, 4, 0, 2 * Math.PI);
-      ctx.fill();
+    async function initMediaPipe() {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+        );
+        const handLandmarker = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numHands: 2, 
+        });
+
+        if (!active) return;
+        handLandmarkerRef.current = handLandmarker;
+        setIsLoaded(true);
+        startCamera();
+      } catch (err: unknown) {
+        if (active && err instanceof Error) {
+          setError("Failed to load MediaPipe: " + err.message);
+        }
+      }
+    }
+    initMediaPipe();
+    
+    return () => { 
+      active = false; 
+    };
+  }, [predict]);
+
+  useEffect(() => {
+    if (threeCanvasRef.current) {
+      sceneManagerRef.current = new SceneManager(
+        threeCanvasRef.current, 
+        threeCanvasRef.current.clientWidth, 
+        threeCanvasRef.current.clientHeight,
+        audioEngineRef.current
+      );
+      
+      sceneManagerRef.current.onSceneChange = (name) => {
+        setActiveSceneName(name);
+      };
+
+      const handleResize = () => {
+        if (sceneManagerRef.current && threeCanvasRef.current) {
+          sceneManagerRef.current.resize(
+            threeCanvasRef.current.clientWidth,
+            threeCanvasRef.current.clientHeight
+          );
+        }
+      };
+      window.addEventListener("resize", handleResize);
+
+      return () => {
+        window.removeEventListener("resize", handleResize);
+        if (sceneManagerRef.current) {
+          sceneManagerRef.current.dispose();
+          sceneManagerRef.current = null;
+        }
+      };
+    }
+  }, []);
+
+  const enableMic = async () => {
+    setMicStatus("Requesting...");
+    await audioEngineRef.current.initialize();
+    if (audioEngineRef.current.isReady) {
+      setMicStatus("Active");
+    } else {
+      setMicStatus("Denied/Error");
     }
   };
 
@@ -217,10 +222,11 @@ export default function HandTracking() {
   };
 
   useEffect(() => {
+    const audioRef = audioEngineRef.current;
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
       if (handLandmarkerRef.current) handLandmarkerRef.current.close();
-      if (audioEngineRef.current) audioEngineRef.current.dispose();
+      if (audioRef) audioRef.dispose();
     };
   }, []);
 

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BaseScene } from '../scenes/BaseScene';
-import { MultiHandState, ScenePlugin, AudioState } from './EngineInterfaces';
+import { MultiHandState, ScenePlugin } from './EngineInterfaces';
 import { AudioEngine } from '../features/AudioEngine';
 
 // Plugins

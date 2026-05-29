@@ -9,17 +9,19 @@ export class AudioEngine {
   public async initialize(): Promise<void> {
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.context = new (window.AudioContext || (window as any).webkitAudioContext)();
+      this.context = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
       const source = this.context.createMediaStreamSource(this.stream);
       this.analyser = this.context.createAnalyser();
       this.analyser.fftSize = 256;
       source.connect(this.analyser);
       this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
       this.isReady = true;
-    } catch (err: any) {
-      this.error = "Mic permission denied or unavailable";
-      this.isReady = false;
-      console.warn("AudioEngine fallback mode:", err);
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        this.error = "Mic permission denied or unavailable";
+        this.isReady = false;
+        console.warn("AudioEngine fallback mode:", err.message);
+      }
     }
   }
 
@@ -27,6 +29,7 @@ export class AudioEngine {
     if (!this.isReady || !this.analyser || !this.dataArray) {
       return { amplitude: 0, frequencyData: null };
     }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.analyser.getByteFrequencyData(this.dataArray as any);
     
     let sum = 0;

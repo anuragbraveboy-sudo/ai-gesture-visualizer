@@ -22,6 +22,7 @@ export interface AudioState {
 export interface ScenePlugin {
   name: string;
   TriggerGesture: GestureType;
-  TriggerGesture2?: GestureType; // If set, requires two hands
-  SceneClass: any; 
+  TriggerGesture2?: GestureType;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  SceneClass: new () => any; 
 }
