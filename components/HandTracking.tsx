@@ -7,23 +7,31 @@ import { GestureSmoother } from "../lib/gesture-smoothing";
 import { SceneManager } from "../lib/engine/SceneManager";
 import { MultiHandState, GestureData } from "../lib/engine/EngineInterfaces";
 import { ExportEngine } from "../lib/features/ExportEngine";
+import { AudioEngine } from "../lib/features/AudioEngine";
+import { MultiHandInteractionEngine } from "../lib/engine/MultiHandInteractionEngine";
 
 export default function HandTracking() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const mediapipeCanvasRef = useRef<HTMLCanvasElement>(null);
   const threeCanvasRef = useRef<HTMLCanvasElement>(null);
+  
   const sceneManagerRef = useRef<SceneManager | null>(null);
+  const audioEngineRef = useRef<AudioEngine>(new AudioEngine());
   
   const [isLoaded, setIsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [handState, setHandState] = useState<MultiHandState>({ hands: [] });
+  const [handState, setHandState] = useState<MultiHandState>({ hands: [], distance: 0 });
   const [activeSceneName, setActiveSceneName] = useState<string>("None");
+  const [micStatus, setMicStatus] = useState<string>("Disabled");
+  const [audioAmp, setAudioAmp] = useState<number>(0);
+  const [fps, setFps] = useState<number>(0);
   
-  // Smoothers for up to 2 hands
   const smoothersRef = useRef([new GestureSmoother(), new GestureSmoother()]);
-  
   const handLandmarkerRef = useRef<HandLandmarker | null>(null);
   const requestRef = useRef<number | null>(null);
+
+  const lastFpsTime = useRef<number>(performance.now());
+  const frames = useRef<number>(0);
 
   useEffect(() => {
     let active = true;
@@ -38,7 +46,7 @@ export default function HandTracking() {
             delegate: "GPU"
           },
           runningMode: "VIDEO",
-          numHands: 2, // Multi-Hand Support
+          numHands: 2, 
         });
 
         if (!active) return;
@@ -56,13 +64,13 @@ export default function HandTracking() {
     };
   }, []);
 
-  // Initialize Three.js SceneManager
   useEffect(() => {
     if (threeCanvasRef.current) {
       sceneManagerRef.current = new SceneManager(
         threeCanvasRef.current, 
         threeCanvasRef.current.clientWidth, 
-        threeCanvasRef.current.clientHeight
+        threeCanvasRef.current.clientHeight,
+        audioEngineRef.current
       );
       
       sceneManagerRef.current.onSceneChange = (name) => {
@@ -104,8 +112,30 @@ export default function HandTracking() {
     }
   };
 
+  const enableMic = async () => {
+    setMicStatus("Requesting...");
+    await audioEngineRef.current.initialize();
+    if (audioEngineRef.current.isReady) {
+      setMicStatus("Active");
+    } else {
+      setMicStatus("Denied/Error");
+    }
+  };
+
   let lastVideoTime = -1;
   const predict = (timestamp: number) => {
+    frames.current++;
+    if (timestamp - lastFpsTime.current >= 1000) {
+      setFps(Math.round((frames.current * 1000) / (timestamp - lastFpsTime.current)));
+      frames.current = 0;
+      lastFpsTime.current = timestamp;
+    }
+
+    if (frames.current % 5 === 0 && audioEngineRef.current.isReady) {
+      const data = audioEngineRef.current.getAudioData();
+      setAudioAmp(data.amplitude);
+    }
+
     if (videoRef.current && mediapipeCanvasRef.current && handLandmarkerRef.current) {
       const video = videoRef.current;
       const canvas = mediapipeCanvasRef.current;
@@ -126,7 +156,7 @@ export default function HandTracking() {
           
           if (results.landmarks && results.landmarks.length > 0) {
             for (let i = 0; i < results.landmarks.length; i++) {
-              if (i >= smoothersRef.current.length) break; // Limit to smoothers max
+              if (i >= smoothersRef.current.length) break; 
               
               const currentLandmarks = results.landmarks[i];
               drawLandmarks(ctx, currentLandmarks, canvas.width, canvas.height);
@@ -143,14 +173,12 @@ export default function HandTracking() {
               });
             }
           } else {
-            // Reset smoothers if no hands
             smoothersRef.current.forEach(s => s.reset());
           }
           
-          const nextState = { hands: newHandsState };
+          const nextState = MultiHandInteractionEngine.process(newHandsState);
           setHandState(nextState);
           
-          // Feed to scene engine
           if (sceneManagerRef.current) {
             sceneManagerRef.current.updateHandState(nextState);
           }
@@ -192,21 +220,35 @@ export default function HandTracking() {
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
       if (handLandmarkerRef.current) handLandmarkerRef.current.close();
+      if (audioEngineRef.current) audioEngineRef.current.dispose();
     };
   }, []);
 
   return (
     <div className="flex flex-col lg:flex-row h-screen p-4 gap-4 bg-neutral-900 text-white">
-      {/* Viewport Area */}
       <div className="flex-1 flex flex-col items-center justify-center relative">
         <div className="flex justify-between items-center w-full mb-4">
-          <h1 className="text-2xl font-bold">AI Visualizer - Phase 3</h1>
-          <button 
-            onClick={handleScreenshot}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded font-semibold transition-colors"
-          >
-            📸 Export Frame
-          </button>
+          <div className="flex items-center gap-4">
+            <h1 className="text-2xl font-bold">AI Visualizer - Phase 4</h1>
+            <span className={`px-2 py-1 rounded text-sm font-mono ${fps >= 30 ? 'bg-green-600' : 'bg-red-600'}`}>
+              {fps} FPS
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <button 
+              onClick={enableMic}
+              className={`px-4 py-2 rounded font-semibold transition-colors ${micStatus === 'Active' ? 'bg-green-600' : 'bg-blue-600 hover:bg-blue-500'}`}
+              disabled={micStatus === 'Active' || micStatus === 'Requesting...'}
+            >
+              🎤 {micStatus === 'Active' ? 'Mic Active' : 'Enable Mic'}
+            </button>
+            <button 
+              onClick={handleScreenshot}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded font-semibold transition-colors"
+            >
+              📸 Export Frame
+            </button>
+          </div>
         </div>
         
         {error && (
@@ -222,35 +264,57 @@ export default function HandTracking() {
         )}
 
         <div className="relative rounded-lg overflow-hidden border border-neutral-700 bg-black aspect-video w-full max-w-4xl shadow-2xl">
-          {/* 1. Webcam Video Layer */}
           <video 
             ref={videoRef}
             className="absolute top-0 left-0 w-full h-full object-cover transform -scale-x-100 opacity-30"
             playsInline
           />
-          {/* 2. MediaPipe Debug Layer */}
           <canvas
             ref={mediapipeCanvasRef}
             className="absolute top-0 left-0 w-full h-full object-cover transform -scale-x-100 z-10 opacity-30 pointer-events-none"
           />
-          {/* 3. Three.js Engine Layer */}
           <canvas
             ref={threeCanvasRef}
             className="absolute top-0 left-0 w-full h-full object-cover z-20 pointer-events-none"
           />
           
-          {/* Active Scene Indicator */}
           {activeSceneName !== "None" && (
-            <div className="absolute top-4 left-4 z-30 bg-purple-900/80 backdrop-blur-sm px-6 py-3 rounded shadow-lg border border-purple-400 flex items-center gap-3 transition-all">
+            <div className="absolute top-4 left-4 z-30 bg-purple-900/80 backdrop-blur-sm px-6 py-3 rounded shadow-lg border border-purple-400 flex flex-col gap-1 transition-all">
               <span className="font-bold text-lg drop-shadow-md">Scene: {activeSceneName}</span>
+              {handState.hands.length >= 2 && (
+                <span className="text-xs text-purple-200">
+                  Dual-Hand Active (Dist: {handState.distance.toFixed(2)})
+                </span>
+              )}
             </div>
           )}
         </div>
       </div>
 
-      {/* Sidebar Panel */}
       <div className="w-full lg:w-80 flex flex-col gap-4">
-        {/* Multi-Hand Debug Panel */}
+        
+        <div className="bg-neutral-800 rounded-lg p-4 border border-neutral-700 shadow-lg">
+          <h2 className="text-lg font-semibold mb-3 border-b border-neutral-700 pb-2 text-blue-400">Audio Engine</h2>
+          <div className="space-y-3">
+            <div className="flex justify-between text-sm">
+              <span className="text-neutral-400">Status:</span>
+              <span className={micStatus === 'Active' ? 'text-green-400' : 'text-neutral-500'}>{micStatus}</span>
+            </div>
+            <div>
+              <div className="flex justify-between text-sm mb-1">
+                <span className="text-neutral-400">Amplitude:</span>
+                <span className="text-blue-300">{(audioAmp * 100).toFixed(1)}%</span>
+              </div>
+              <div className="w-full bg-neutral-700 h-2 rounded overflow-hidden">
+                <div 
+                  className="bg-blue-500 h-full transition-all duration-75"
+                  style={{ width: `${Math.min(100, audioAmp * 100 * 3)}%` }} 
+                ></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div className="bg-neutral-800 rounded-lg p-4 border border-neutral-700 shadow-lg flex-1 overflow-y-auto">
           <h2 className="text-lg font-semibold mb-3 border-b border-neutral-700 pb-2 text-indigo-400">Hand States</h2>
           
@@ -264,12 +328,6 @@ export default function HandTracking() {
                       <span className="text-neutral-400">Triggered:</span>
                       <span className={hand.triggered !== "Unknown" ? "text-green-400 font-bold" : "text-neutral-500"}>
                         {hand.triggered}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center mt-1">
-                      <span className="text-neutral-400">Stabilized:</span>
-                      <span className={hand.stabilized !== "Unknown" ? "text-blue-400" : "text-neutral-500"}>
-                        {hand.stabilized}
                       </span>
                     </div>
                     <div className="flex justify-between items-center mt-1">

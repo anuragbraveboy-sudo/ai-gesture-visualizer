@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BaseScene } from './BaseScene';
-import { MultiHandState } from '../engine/EngineInterfaces';
+import { MultiHandState, AudioState } from '../engine/EngineInterfaces';
 
 export class NeonCathedral extends BaseScene {
   private grid!: THREE.GridHelper;
@@ -27,11 +27,16 @@ export class NeonCathedral extends BaseScene {
     }
   }
 
-  public update(time: number, delta: number, handState: MultiHandState): void {
-    this.group.rotation.y = time * 0.1;
+  public update(time: number, delta: number, handState: MultiHandState, audioState: AudioState): void {
+    // Distance intensity (closer = stronger)
+    const distIntensity = handState.hands.length >= 2 ? Math.max(0, 1 - handState.distance * 2) : 0;
+    const intensity = 1 + audioState.amplitude * 5 + distIntensity * 2;
+    
+    this.group.rotation.y = time * 0.1 * intensity;
+    
     if (handState.hands.length > 0) {
       const hand = handState.hands[0];
-      const scale = 1 + (hand.confidence / 100) * 0.5;
+      const scale = 1 + (hand.confidence / 100) * 0.5 * intensity;
       this.grid.scale.set(scale, scale, scale);
     }
   }

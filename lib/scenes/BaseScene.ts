@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { MultiHandState } from '../engine/EngineInterfaces';
+import { MultiHandState, AudioState } from '../engine/EngineInterfaces';
 
 export abstract class BaseScene {
   protected scene: THREE.Scene;
@@ -24,7 +24,7 @@ export abstract class BaseScene {
 
   protected abstract onInit(): void;
 
-  public abstract update(time: number, delta: number, handState: MultiHandState): void;
+  public abstract update(time: number, delta: number, handState: MultiHandState, audioState: AudioState): void;
 
   public onTransitionIn(): void {
     this.group.visible = true;
@@ -37,7 +37,6 @@ export abstract class BaseScene {
   public dispose(): void {
     this.scene.remove(this.group);
     
-    // Rigorous resource cleanup to prevent memory leaks
     this.group.traverse((object) => {
       if (object instanceof THREE.Mesh || object instanceof THREE.Points) {
         if (object.geometry) {

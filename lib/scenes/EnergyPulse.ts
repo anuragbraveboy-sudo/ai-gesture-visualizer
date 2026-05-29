@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BaseScene } from './BaseScene';
-import { MultiHandState } from '../engine/EngineInterfaces';
+import { MultiHandState, AudioState } from '../engine/EngineInterfaces';
 
 export class EnergyPulse extends BaseScene {
   private rings: THREE.Mesh[] = [];
@@ -16,13 +16,16 @@ export class EnergyPulse extends BaseScene {
     }
   }
 
-  public update(time: number, delta: number, handState: MultiHandState): void {
+  public update(time: number, delta: number, handState: MultiHandState, audioState: AudioState): void {
+    const distIntensity = handState.hands.length >= 2 ? Math.max(0, 1 - handState.distance * 2) : 0;
+    const intensity = 1 + audioState.amplitude * 4 + distIntensity;
+
     this.rings.forEach((ring, idx) => {
-      const scale = 1 + ((time * 2 + idx) % 3);
+      const scale = (1 + ((time * 2 * intensity + idx) % 3));
       ring.scale.set(scale, scale, scale);
       (ring.material as THREE.MeshBasicMaterial).opacity = 1 - (scale / 4);
-      ring.rotation.x = time * (0.5 + idx * 0.2);
-      ring.rotation.y = time * (0.3 + idx * 0.1);
+      ring.rotation.x = time * (0.5 + idx * 0.2) * intensity;
+      ring.rotation.y = time * (0.3 + idx * 0.1) * intensity;
     });
   }
 }

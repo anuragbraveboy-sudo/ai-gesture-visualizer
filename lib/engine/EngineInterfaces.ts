@@ -11,10 +11,17 @@ export interface GestureData {
 
 export interface MultiHandState {
   hands: GestureData[];
+  distance: number; 
+}
+
+export interface AudioState {
+  amplitude: number;
+  frequencyData: Uint8Array | null;
 }
 
 export interface ScenePlugin {
   name: string;
   TriggerGesture: GestureType;
-  SceneClass: any; // Class implementing BaseScene
+  TriggerGesture2?: GestureType; // If set, requires two hands
+  SceneClass: any; 
 }

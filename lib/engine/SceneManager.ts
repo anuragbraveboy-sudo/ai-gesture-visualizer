@@ -1,13 +1,23 @@
 import * as THREE from 'three';
 import { BaseScene } from '../scenes/BaseScene';
-import { MultiHandState, ScenePlugin } from './EngineInterfaces';
+import { MultiHandState, ScenePlugin, AudioState } from './EngineInterfaces';
+import { AudioEngine } from '../features/AudioEngine';
 
 // Plugins
 import { NeonCathedral } from '../scenes/NeonCathedral';
 import { GalaxyParticles } from '../scenes/GalaxyParticles';
 import { EnergyPulse } from '../scenes/EnergyPulse';
+import { PortalScene } from '../scenes/PortalScene';
+import { GalaxyExplosion } from '../scenes/GalaxyExplosion';
+import { EnergyBeam } from '../scenes/EnergyBeam';
 
 export const SCENE_PLUGINS: ScenePlugin[] = [
+  // Dual-hand scenes (higher priority)
+  { name: "Portal Scene", TriggerGesture: "Open Palm", TriggerGesture2: "Open Palm", SceneClass: PortalScene },
+  { name: "Galaxy Explosion", TriggerGesture: "Peace Sign", TriggerGesture2: "Peace Sign", SceneClass: GalaxyExplosion },
+  { name: "Energy Beam", TriggerGesture: "Open Palm", TriggerGesture2: "Thumbs Up", SceneClass: EnergyBeam },
+  { name: "Energy Beam", TriggerGesture: "Thumbs Up", TriggerGesture2: "Open Palm", SceneClass: EnergyBeam },
+  // Single-hand scenes
   { name: "Neon Cathedral", TriggerGesture: "Open Palm", SceneClass: NeonCathedral },
   { name: "Galaxy Particles", TriggerGesture: "Peace Sign", SceneClass: GalaxyParticles },
   { name: "Energy Pulse", TriggerGesture: "Thumbs Up", SceneClass: EnergyPulse },
@@ -21,20 +31,22 @@ export class SceneManager {
   private currentPlugin: ScenePlugin | null = null;
   private animationId: number = 0;
   private clock: THREE.Clock;
-  private handState: MultiHandState = { hands: [] };
+  private handState: MultiHandState = { hands: [], distance: 0 };
+  private audioEngine: AudioEngine | null = null;
   
   public onSceneChange?: (sceneName: string) => void;
 
-  constructor(canvas: HTMLCanvasElement, width: number, height: number) {
+  constructor(canvas: HTMLCanvasElement, width: number, height: number, audioEngine: AudioEngine) {
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
     this.camera.position.z = 5;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, preserveDrawingBuffer: true }); // preserveDrawingBuffer for Export
+    this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, preserveDrawingBuffer: true });
     this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
     this.clock = new THREE.Clock();
+    this.audioEngine = audioEngine;
     
     this.renderLoop = this.renderLoop.bind(this);
     this.animationId = requestAnimationFrame(this.renderLoop);
@@ -43,16 +55,33 @@ export class SceneManager {
   public updateHandState(state: MultiHandState) {
     this.handState = state;
     
-    // Check if we need to transition
     if (state.hands.length > 0) {
-      for (const hand of state.hands) {
-        if (hand.triggered !== "Unknown") {
-          const matchedPlugin = SCENE_PLUGINS.find(p => p.TriggerGesture === hand.triggered);
-          if (matchedPlugin && this.currentPlugin?.name !== matchedPlugin.name) {
-            this.transitionToScene(matchedPlugin);
-            break; 
+      let matchedPlugin: ScenePlugin | undefined = undefined;
+
+      // Try dual-hand matches first
+      if (state.hands.length >= 2) {
+        const t1 = state.hands[0].triggered;
+        const t2 = state.hands[1].triggered;
+        
+        matchedPlugin = SCENE_PLUGINS.find(p => 
+          p.TriggerGesture2 && 
+          ((p.TriggerGesture === t1 && p.TriggerGesture2 === t2) || 
+           (p.TriggerGesture === t2 && p.TriggerGesture2 === t1))
+        );
+      }
+
+      // Try single-hand matches if no dual match
+      if (!matchedPlugin) {
+        for (const hand of state.hands) {
+          if (hand.triggered !== "Unknown") {
+            matchedPlugin = SCENE_PLUGINS.find(p => p.TriggerGesture === hand.triggered && !p.TriggerGesture2);
+            if (matchedPlugin) break;
           }
         }
+      }
+
+      if (matchedPlugin && this.currentPlugin?.name !== matchedPlugin.name) {
+        this.transitionToScene(matchedPlugin);
       }
     }
   }
@@ -89,8 +118,10 @@ export class SceneManager {
     const delta = this.clock.getDelta();
     const time = this.clock.getElapsedTime();
 
+    const audioData = this.audioEngine ? this.audioEngine.getAudioData() : { amplitude: 0, frequencyData: null };
+
     if (this.currentSceneObj) {
-      this.currentSceneObj.update(time, delta, this.handState);
+      this.currentSceneObj.update(time, delta, this.handState, audioData);
     }
 
     this.renderer.render(this.scene, this.camera);
