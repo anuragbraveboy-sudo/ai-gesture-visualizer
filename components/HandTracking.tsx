@@ -4,21 +4,23 @@ import { useEffect, useRef, useState } from "react";
 import { HandLandmarker, FilesetResolver, NormalizedLandmark } from "@mediapipe/tasks-vision";
 import { detectGesture } from "../lib/gesture-recognition";
 import { GestureSmoother } from "../lib/gesture-smoothing";
-import { GestureType } from "../lib/gesture-config";
+import { SceneManager } from "../lib/engine/SceneManager";
+import { MultiHandState, GestureData } from "../lib/engine/EngineInterfaces";
+import { ExportEngine } from "../lib/features/ExportEngine";
 
 export default function HandTracking() {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mediapipeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const threeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const sceneManagerRef = useRef<SceneManager | null>(null);
+  
   const [isLoaded, setIsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [landmarks, setLandmarks] = useState<NormalizedLandmark[] | null>(null);
+  const [handState, setHandState] = useState<MultiHandState>({ hands: [] });
+  const [activeSceneName, setActiveSceneName] = useState<string>("None");
   
-  // Gesture State
-  const smootherRef = useRef(new GestureSmoother());
-  const [rawGesture, setRawGesture] = useState<GestureType>("Unknown");
-  const [stabilizedGesture, setStabilizedGesture] = useState<GestureType>("Unknown");
-  const [confidence, setConfidence] = useState<number>(0);
-  const [triggeredGesture, setTriggeredGesture] = useState<GestureType>("Unknown");
+  // Smoothers for up to 2 hands
+  const smoothersRef = useRef([new GestureSmoother(), new GestureSmoother()]);
   
   const handLandmarkerRef = useRef<HandLandmarker | null>(null);
   const requestRef = useRef<number | null>(null);
@@ -36,7 +38,7 @@ export default function HandTracking() {
             delegate: "GPU"
           },
           runningMode: "VIDEO",
-          numHands: 1,
+          numHands: 2, // Multi-Hand Support
         });
 
         if (!active) return;
@@ -48,7 +50,43 @@ export default function HandTracking() {
       }
     }
     initMediaPipe();
-    return () => { active = false; };
+    
+    return () => { 
+      active = false; 
+    };
+  }, []);
+
+  // Initialize Three.js SceneManager
+  useEffect(() => {
+    if (threeCanvasRef.current) {
+      sceneManagerRef.current = new SceneManager(
+        threeCanvasRef.current, 
+        threeCanvasRef.current.clientWidth, 
+        threeCanvasRef.current.clientHeight
+      );
+      
+      sceneManagerRef.current.onSceneChange = (name) => {
+        setActiveSceneName(name);
+      };
+
+      const handleResize = () => {
+        if (sceneManagerRef.current && threeCanvasRef.current) {
+          sceneManagerRef.current.resize(
+            threeCanvasRef.current.clientWidth,
+            threeCanvasRef.current.clientHeight
+          );
+        }
+      };
+      window.addEventListener("resize", handleResize);
+
+      return () => {
+        window.removeEventListener("resize", handleResize);
+        if (sceneManagerRef.current) {
+          sceneManagerRef.current.dispose();
+          sceneManagerRef.current = null;
+        }
+      };
+    }
   }, []);
 
   const startCamera = async () => {
@@ -68,9 +106,9 @@ export default function HandTracking() {
 
   let lastVideoTime = -1;
   const predict = (timestamp: number) => {
-    if (videoRef.current && canvasRef.current && handLandmarkerRef.current) {
+    if (videoRef.current && mediapipeCanvasRef.current && handLandmarkerRef.current) {
       const video = videoRef.current;
-      const canvas = canvasRef.current;
+      const canvas = mediapipeCanvasRef.current;
       const ctx = canvas.getContext("2d");
 
       if (video.videoWidth > 0 && video.currentTime !== lastVideoTime) {
@@ -83,27 +121,38 @@ export default function HandTracking() {
         
         if (ctx) {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
+          
+          const newHandsState: GestureData[] = [];
+          
           if (results.landmarks && results.landmarks.length > 0) {
-            const currentLandmarks = results.landmarks[0];
-            setLandmarks(currentLandmarks);
-            drawLandmarks(ctx, currentLandmarks, canvas.width, canvas.height);
-            
-            // Gesture Recognition
-            const raw = detectGesture(currentLandmarks);
-            setRawGesture(raw);
-            
-            const smoothed = smootherRef.current.process(raw, timestamp);
-            setStabilizedGesture(smoothed.stabilized);
-            setConfidence(smoothed.confidence);
-            setTriggeredGesture(smoothed.triggered);
-
+            for (let i = 0; i < results.landmarks.length; i++) {
+              if (i >= smoothersRef.current.length) break; // Limit to smoothers max
+              
+              const currentLandmarks = results.landmarks[i];
+              drawLandmarks(ctx, currentLandmarks, canvas.width, canvas.height);
+              
+              const raw = detectGesture(currentLandmarks);
+              const smoothed = smoothersRef.current[i].process(raw, timestamp);
+              
+              newHandsState.push({
+                raw: raw,
+                stabilized: smoothed.stabilized,
+                confidence: smoothed.confidence,
+                triggered: smoothed.triggered,
+                landmarks: currentLandmarks
+              });
+            }
           } else {
-            setLandmarks(null);
-            setRawGesture("Unknown");
-            smootherRef.current.reset();
-            setStabilizedGesture("Unknown");
-            setConfidence(0);
-            setTriggeredGesture("Unknown");
+            // Reset smoothers if no hands
+            smoothersRef.current.forEach(s => s.reset());
+          }
+          
+          const nextState = { hands: newHandsState };
+          setHandState(nextState);
+          
+          // Feed to scene engine
+          if (sceneManagerRef.current) {
+            sceneManagerRef.current.updateHandState(nextState);
           }
         }
       }
@@ -133,6 +182,12 @@ export default function HandTracking() {
     }
   };
 
+  const handleScreenshot = () => {
+    if (sceneManagerRef.current) {
+      ExportEngine.captureScreenshot(sceneManagerRef.current.getCanvas());
+    }
+  };
+
   useEffect(() => {
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
@@ -142,39 +197,52 @@ export default function HandTracking() {
 
   return (
     <div className="flex flex-col lg:flex-row h-screen p-4 gap-4 bg-neutral-900 text-white">
-      {/* Video Area */}
+      {/* Viewport Area */}
       <div className="flex-1 flex flex-col items-center justify-center relative">
-        <h1 className="text-2xl font-bold mb-4">AI Gesture Visualizer</h1>
+        <div className="flex justify-between items-center w-full mb-4">
+          <h1 className="text-2xl font-bold">AI Visualizer - Phase 3</h1>
+          <button 
+            onClick={handleScreenshot}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded font-semibold transition-colors"
+          >
+            📸 Export Frame
+          </button>
+        </div>
         
         {error && (
-          <div className="bg-red-500/20 text-red-300 p-4 rounded-lg mb-4">
+          <div className="bg-red-500/20 text-red-300 p-4 rounded-lg mb-4 w-full">
             {error}
           </div>
         )}
 
         {!isLoaded && !error && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-10 rounded-lg">
-            <div className="text-xl animate-pulse">Loading AI Models...</div>
+          <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-30 rounded-lg">
+            <div className="text-xl animate-pulse">Loading Engines...</div>
           </div>
         )}
 
-        {/* Primary Viewport */}
         <div className="relative rounded-lg overflow-hidden border border-neutral-700 bg-black aspect-video w-full max-w-4xl shadow-2xl">
+          {/* 1. Webcam Video Layer */}
           <video 
             ref={videoRef}
-            className="absolute top-0 left-0 w-full h-full object-cover transform -scale-x-100"
+            className="absolute top-0 left-0 w-full h-full object-cover transform -scale-x-100 opacity-30"
             playsInline
           />
+          {/* 2. MediaPipe Debug Layer */}
           <canvas
-            ref={canvasRef}
-            className="absolute top-0 left-0 w-full h-full object-cover transform -scale-x-100 z-10"
+            ref={mediapipeCanvasRef}
+            className="absolute top-0 left-0 w-full h-full object-cover transform -scale-x-100 z-10 opacity-30 pointer-events-none"
+          />
+          {/* 3. Three.js Engine Layer */}
+          <canvas
+            ref={threeCanvasRef}
+            className="absolute top-0 left-0 w-full h-full object-cover z-20 pointer-events-none"
           />
           
-          {/* Active Gesture Overlay Indicator */}
-          {triggeredGesture !== "Unknown" && (
-            <div className="absolute top-4 left-4 z-20 bg-green-500/80 backdrop-blur-sm px-6 py-3 rounded-full shadow-lg border border-green-400 flex items-center gap-3">
-              <div className="w-3 h-3 bg-white rounded-full animate-pulse" />
-              <span className="font-bold text-xl drop-shadow-md">{triggeredGesture}</span>
+          {/* Active Scene Indicator */}
+          {activeSceneName !== "None" && (
+            <div className="absolute top-4 left-4 z-30 bg-purple-900/80 backdrop-blur-sm px-6 py-3 rounded shadow-lg border border-purple-400 flex items-center gap-3 transition-all">
+              <span className="font-bold text-lg drop-shadow-md">Scene: {activeSceneName}</span>
             </div>
           )}
         </div>
@@ -182,58 +250,39 @@ export default function HandTracking() {
 
       {/* Sidebar Panel */}
       <div className="w-full lg:w-80 flex flex-col gap-4">
-        {/* Debug Panel */}
-        <div className="bg-neutral-800 rounded-lg p-4 border border-neutral-700 shadow-lg">
-          <h2 className="text-lg font-semibold mb-3 border-b border-neutral-700 pb-2 text-indigo-400">Debug Panel</h2>
-          <div className="space-y-2 text-sm font-mono">
-            <div className="flex justify-between items-center">
-              <span className="text-neutral-400">Raw Gesture:</span>
-              <span className={rawGesture !== "Unknown" ? "text-yellow-400" : "text-neutral-500"}>
-                {rawGesture}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-neutral-400">Stabilized:</span>
-              <span className={stabilizedGesture !== "Unknown" ? "text-blue-400" : "text-neutral-500"}>
-                {stabilizedGesture}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-neutral-400">Confidence:</span>
-              <span className="text-green-400">{confidence}%</span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-neutral-400">Landmarks:</span>
-              <span className="text-white">{landmarks ? landmarks.length : 0}</span>
-            </div>
-          </div>
+        {/* Multi-Hand Debug Panel */}
+        <div className="bg-neutral-800 rounded-lg p-4 border border-neutral-700 shadow-lg flex-1 overflow-y-auto">
+          <h2 className="text-lg font-semibold mb-3 border-b border-neutral-700 pb-2 text-indigo-400">Hand States</h2>
           
-          {/* Confidence Bar */}
-          <div className="mt-4 h-2 w-full bg-neutral-900 rounded-full overflow-hidden">
-            <div 
-              className="h-full bg-green-500 transition-all duration-300 ease-out"
-              style={{ width: `${confidence}%` }}
-            />
-          </div>
-        </div>
-
-        {/* Coordinates Panel */}
-        <div className="bg-neutral-800 rounded-lg p-4 border border-neutral-700 shadow-lg flex-1 overflow-y-auto min-h-[300px]">
-          <h2 className="text-lg font-semibold mb-3 border-b border-neutral-700 pb-2 text-indigo-400">Coordinates</h2>
-          {landmarks ? (
-            <div className="space-y-1 text-xs font-mono">
-              {landmarks.map((lm, idx) => (
-                <div key={idx} className="flex justify-between hover:bg-neutral-700 p-1 rounded transition-colors">
-                  <span className="text-neutral-400 w-6">[{idx}]</span>
-                  <span className="text-red-400">X: {lm.x.toFixed(3)}</span>
-                  <span className="text-green-400">Y: {lm.y.toFixed(3)}</span>
-                  <span className="text-blue-400">Z: {lm.z.toFixed(3)}</span>
+          {handState.hands.length > 0 ? (
+            <div className="space-y-4">
+              {handState.hands.map((hand, idx) => (
+                <div key={idx} className="bg-neutral-900 p-3 rounded border border-neutral-700">
+                  <h3 className="font-bold text-sm text-neutral-300 mb-2 border-b border-neutral-800 pb-1">Hand {idx + 1}</h3>
+                  <div className="space-y-1 text-xs font-mono">
+                    <div className="flex justify-between items-center">
+                      <span className="text-neutral-400">Triggered:</span>
+                      <span className={hand.triggered !== "Unknown" ? "text-green-400 font-bold" : "text-neutral-500"}>
+                        {hand.triggered}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center mt-1">
+                      <span className="text-neutral-400">Stabilized:</span>
+                      <span className={hand.stabilized !== "Unknown" ? "text-blue-400" : "text-neutral-500"}>
+                        {hand.stabilized}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center mt-1">
+                      <span className="text-neutral-400">Confidence:</span>
+                      <span className="text-yellow-400">{hand.confidence}%</span>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
           ) : (
             <div className="text-neutral-500 h-full flex items-center justify-center italic text-sm py-10">
-              Waiting for hand...
+              No hands detected.
             </div>
           )}
         </div>
