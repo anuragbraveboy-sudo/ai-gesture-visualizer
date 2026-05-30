@@ -80,6 +80,8 @@ graph TD
    ```
 
 4. Open your browser and navigate to `http://localhost:3000`.
+   Website : https://ai-gesture-visualizer.vercel.app/
+
 
 ## 🎮 Usage Guide
 
